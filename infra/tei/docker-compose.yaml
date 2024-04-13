@@ -1,0 +1,17 @@
+services:
+  text-embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:1.2.0
+    container_name: text-embeddings
+    volumes:
+      - ./data:/data
+    ports:
+      - 8080:80
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+    command: --model-id nomic-ai/nomic-embed-text-v1.5
+    pull_policy: always

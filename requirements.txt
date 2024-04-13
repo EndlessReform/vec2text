@@ -11,6 +11,7 @@ rouge_score
 sacrebleu
 sentence_transformers
 tenacity
+tiktoken
 tokenizers
 tqdm
 transformers
