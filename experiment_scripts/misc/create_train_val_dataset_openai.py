@@ -1,7 +1,9 @@
 from abc import ABC, abstractmethod
 import argparse
+from dataclasses import dataclass
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
+import threading
 
 import datasets
 from dotenv import load_dotenv
@@ -9,6 +11,55 @@ from openai import OpenAI
 from transformers import AutoTokenizer
 import tiktoken
 from tenacity import retry, stop_after_attempt, wait_fixed
+from vec2text.utils import get_num_proc
+from vec2text.data_helpers import retain_dataset_columns
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Embedding Generation Script")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="Tevatron/msmarco-passage-corpus",
+        help="Name of the Hugging Face dataset (default: Tevatron/msmarco-passage-corpus)",
+    )
+    parser.add_argument(
+        "--splits",
+        type=str,
+        default="train",
+        choices=["train", "test", "all"],
+        help="Dataset splits to process (default: train)",
+    )
+    parser.add_argument(
+        "--embedder_name",
+        type=str,
+        default="text-embedding-ada-002",
+        help="Name of the embedder model (default: text-embedding-ada-002)",
+    )
+    parser.add_argument(
+        "--api_base_url",
+        type=str,
+        default=None,
+        help="Embedder API base URL (optional, defaults to OAI)",
+    )
+    parser.add_argument(
+        "--max_tokens",
+        type=int,
+        default=128,
+        help="Maximum number of tokens per embedding (default: 128)",
+    )
+    parser.add_argument(
+        "--save_to_hub",
+        action="store_true",
+        help="Save the embeddings to the Hugging Face Hub",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Run on subset of data to test system",
+    )
+    return parser.parse_args()
 
 
 OAI_EMBEDDING_MODELS = [
@@ -58,50 +109,22 @@ def load_encoder(embedder_name: str) -> AbstractTokenizer:
         return HFTokenizer(embedder_name)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Embedding Generation Script")
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default="Tevatron/msmarco-passage-corpus",
-        help="Name of the Hugging Face dataset (default: Tevatron/msmarco-passage-corpus)",
-    )
-    parser.add_argument(
-        "--splits",
-        type=str,
-        default="train",
-        choices=["train", "test", "all"],
-        help="Dataset splits to process (default: train)",
-    )
-    parser.add_argument(
-        "--embedder_name",
-        type=str,
-        default="text-embedding-ada-002",
-        help="Name of the embedder model (default: text-embedding-ada-002)",
-    )
-    parser.add_argument(
-        "--api_base_url",
-        type=str,
-        default=None,
-        help="Embedder API base URL (optional, defaults to OAI)",
-    )
-    parser.add_argument(
-        "--max_tokens",
-        type=int,
-        default=128,
-        help="Maximum number of tokens per embedding (default: 128)",
-    )
-    parser.add_argument(
-        "--save_to_hub",
-        action="store_true",
-        help="Save the embeddings to the Hugging Face Hub",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Run on n<=1000 subset of data to test system",
-    )
-    return parser.parse_args()
+thread_local = threading.local()
+
+
+@dataclass
+class OpenAIParams:
+    api_key: Optional[str]
+    base_url: Optional[str]
+
+
+def get_client(params: OpenAIParams):
+    if not hasattr(thread_local, "client"):
+        thread_local.client = OpenAI(
+            api_key=params.api_key,
+            base_url=params.base_url,
+        )
+    return thread_local.client
 
 
 def load_train_split(dataset_id: str) -> datasets.Dataset:
@@ -110,22 +133,23 @@ def load_train_split(dataset_id: str) -> datasets.Dataset:
     return dataset_dict["train"]
 
 
-@retry(wait=wait_fixed(1), stop=stop_after_attempt(2))
-def embed_row(
-    client: OpenAI, model: str, encoder, max_length: int, example: Dict
-) -> Dict:
-    # TODO: Verify everything actually HAS 'text' column
+def tokenize_row(encoder: AbstractTokenizer, max_length: int, example: Dict):
     text_tokens = encoder.encode_batch(example["text"])
     text_tokens = [passage[:max_length] for passage in text_tokens]
     text_list = encoder.decode_batch(text_tokens)
+    example["text"] = text_list
+    return example
 
+
+@retry(wait=wait_fixed(1), stop=stop_after_attempt(2))
+def embed_row(params: OpenAIParams, model: str, example: Dict) -> Dict:
+    client = get_client(params)
     # Assume tokenization and embedding batches are the same
     response = client.embeddings.create(
-        input=text_tokens, model=model, encoding_format="float"
+        input=example["text"], model=model, encoding_format="float"
     )
     embeddings = [e.embedding for e in response.data]
-    example["text"] = text_list
-    example["embeddings"] = embeddings
+    example["embedding"] = embeddings
     return example
 
 
@@ -153,25 +177,33 @@ def main():
         print("Model not from OpenAI; third-party endpoint required")
         exit(1)
 
-    client = OpenAI(
-        api_key=api_key,
-        base_url=args.api_base_url,
-    )
     encoder = load_encoder(args.embedder_name)
     print(f"[*] attempting to load {args.dataset}")
     dataset = load_train_split(args.dataset)
-    if args.debug:
+    if args.limit is not None:
         # TODO: parameterize subset size
-        dataset = dataset.select(range(100))
+        dataset = dataset.select(range(args.limit))
+
+    print(f"[*] tokenizing {args.dataset}")
+    dataset = dataset.map(
+        lambda e: tokenize_row(encoder=encoder, max_length=args.max_tokens, example=e),
+        batched=True,
+        batch_size=2048,
+        num_proc=get_num_proc(),
+    )
 
     print(f"[*] embedding {args.dataset}")
     dataset = dataset.map(
         lambda e: embed_row(
-            client, args.embedder_name, encoder, args.max_tokens, example=e
+            OpenAIParams(api_key=api_key, base_url=args.api_base_url),
+            args.embedder_name,
+            example=e,
         ),
         batched=True,
-        batch_size=32,
+        batch_size=256,
+        num_proc=get_num_proc(),
     )
+    dataset = retain_dataset_columns(dataset, ["text", "embedding"])
 
 
 if __name__ == "__main__":

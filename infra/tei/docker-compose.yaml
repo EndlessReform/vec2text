@@ -13,5 +13,5 @@ services:
             - driver: nvidia
               count: all
               capabilities: [ gpu ]
-    command: --model-id nomic-ai/nomic-embed-text-v1.5
+    command: --model-id nomic-ai/nomic-embed-text-v1.5 --max-client-batch-size 256 --max-batch-tokens 49152
     pull_policy: always
