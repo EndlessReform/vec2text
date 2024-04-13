@@ -203,7 +203,15 @@ def main():
         batch_size=256,
         num_proc=get_num_proc(),
     )
+
+    def escape_id(id: str):
+        return id.replace("/", "_")
+
     dataset = retain_dataset_columns(dataset, ["text", "embedding"])
+    dataset.save_to_disk(
+        f"datasets/{escape_id(args.dataset)}__{escape_id(args.embedder_name)}__{args.max_tokens}",
+        max_shard_size="5GB",
+    )
 
 
 if __name__ == "__main__":

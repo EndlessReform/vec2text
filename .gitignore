@@ -21,3 +21,4 @@ wandb/
 
 .env
 infra/tei/data
+datasets
