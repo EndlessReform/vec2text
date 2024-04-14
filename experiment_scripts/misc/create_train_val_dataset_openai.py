@@ -1,18 +1,20 @@
-from abc import ABC, abstractmethod
 import argparse
 from dataclasses import dataclass
 import os
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 import threading
 
 import datasets
 from dotenv import load_dotenv
 from openai import OpenAI
-from transformers import AutoTokenizer
-import tiktoken
 from tenacity import retry, stop_after_attempt, wait_fixed
-from vec2text.utils import get_num_proc
 from vec2text.data_helpers import retain_dataset_columns
+from vec2text.utils import get_num_proc
+from vec2text.utils.tokenizer import (
+    load_encoder,
+    OAI_EMBEDDING_MODELS,
+    AbstractTokenizer,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,53 +64,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-OAI_EMBEDDING_MODELS = [
-    "text-embedding-ada-002",
-    "text-embedding-3-small",
-    "text-embedding-3-large",
-]
-
-
-class AbstractTokenizer(ABC):
-    @abstractmethod
-    def encode_batch(self, texts: List[str]) -> List[List[int]]:
-        pass
-
-    @abstractmethod
-    def decode_batch(self, token_ids: List[List[int]]) -> List[str]:
-        pass
-
-
-class TiktokenTokenizer(AbstractTokenizer):
-    def __init__(self, model_name: str):
-        self.tokenizer = tiktoken.encoding_for_model(model_name)
-
-    def encode_batch(self, texts: List[str]) -> List[List[int]]:
-        return self.tokenizer.encode_batch(texts)
-
-    def decode_batch(self, token_ids: List[List[int]]) -> List[str]:
-        return self.tokenizer.decode_batch(token_ids)
-
-
-class HFTokenizer(AbstractTokenizer):
-    def __init__(self, model_name: str):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-    def encode_batch(self, texts: List[str]) -> List[List[int]]:
-        return self.tokenizer(texts)["input_ids"]
-
-    def decode_batch(self, token_ids: List[List[int]]) -> List[str]:
-        return self.tokenizer.batch_decode(token_ids, skip_special_tokens=True)
-
-
-def load_encoder(embedder_name: str) -> AbstractTokenizer:
-    if embedder_name in OAI_EMBEDDING_MODELS:
-        return TiktokenTokenizer(embedder_name)
-    else:
-        # Try HF hub
-        return HFTokenizer(embedder_name)
-
-
 thread_local = threading.local()
 
 
@@ -138,6 +93,7 @@ def tokenize_row(encoder: AbstractTokenizer, max_length: int, example: Dict):
     text_tokens = [passage[:max_length] for passage in text_tokens]
     text_list = encoder.decode_batch(text_tokens)
     example["text"] = text_list
+    example["length"] = [len(passage_tokens) for passage_tokens in text_tokens]
     return example
 
 
@@ -149,20 +105,13 @@ def embed_row(params: OpenAIParams, model: str, example: Dict) -> Dict:
         input=example["text"], model=model, encoding_format="float"
     )
     embeddings = [e.embedding for e in response.data]
-    example["embedding"] = embeddings
+    example["frozen_embeddings"] = embeddings
     return example
 
 
 def main():
     args = parse_args()
     print(args)
-
-    full_name = "__".join(
-        (
-            args.dataset,
-            "openai_ada2",
-        )
-    )
 
     load_dotenv()
     api_key = os.getenv("OPENAI_API_KEY")
@@ -207,7 +156,7 @@ def main():
     def escape_id(id: str):
         return id.replace("/", "_")
 
-    dataset = retain_dataset_columns(dataset, ["text", "embedding"])
+    dataset = retain_dataset_columns(dataset, ["text", "frozen_embeddings", "length"])
     dataset.save_to_disk(
         f"datasets/{escape_id(args.dataset)}__{escape_id(args.embedder_name)}__{args.max_tokens}",
         max_shard_size="5GB",
