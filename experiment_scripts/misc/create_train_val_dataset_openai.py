@@ -15,6 +15,7 @@ from vec2text.utils.tokenizer import (
     OAI_EMBEDDING_MODELS,
     AbstractTokenizer,
 )
+from vec2text.experiments import get_dataset_cache_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -158,7 +159,7 @@ def main():
 
     dataset = retain_dataset_columns(dataset, ["text", "frozen_embeddings", "length"])
     dataset.save_to_disk(
-        f"datasets/{escape_id(args.dataset)}__{escape_id(args.embedder_name)}__{args.max_tokens}",
+        f"{get_dataset_cache_path()}/{escape_id(args.dataset)}__{escape_id(args.embedder_name)}__{args.max_tokens}",
         max_shard_size="5GB",
     )
 
