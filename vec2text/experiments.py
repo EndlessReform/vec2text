@@ -48,17 +48,18 @@ os.environ["TOKENIZERS_PARALLELISM"] = "False"
 device = torch.device(
     "cuda"
     if torch.cuda.is_available()
-    else "mps"
-    if torch.backends.mps.is_available()
-    else "cpu"
+    else "mps" if torch.backends.mps.is_available() else "cpu"
 )
 logger = logging.getLogger(__name__)
 
+
+def get_dataset_cache_path():
+    return os.environ.get("VEC2TEXT_CACHE", os.path.expanduser("~/.cache/inversion"))
+
+
 # We maintain our own cache because huggingface datasets caching
 # doesn't always work properly.
-DATASET_CACHE_PATH = os.environ.get(
-    "VEC2TEXT_CACHE", os.path.expanduser("~/.cache/inversion")
-)
+DATASET_CACHE_PATH = get_dataset_cache_path()
 
 
 # Noisy compilation from torch.compile
@@ -397,10 +398,12 @@ class Experiment(abc.ABC):
                     "text",
                     self.model_args.max_seq_length,
                     padding=False,
-                    prefix="search_document"
-                    if self.model_args.embedder_model_name
-                    == "nomic-ai/nomic-embed-text-v1"
-                    else None,
+                    prefix=(
+                        "search_document"
+                        if self.model_args.embedder_model_name
+                        == "nomic-ai/nomic-embed-text-v1"
+                        else None
+                    ),
                 ),
                 batched=True,
                 num_proc=get_num_proc(),

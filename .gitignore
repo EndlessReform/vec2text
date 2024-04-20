@@ -18,3 +18,7 @@ msmarco_msl128_hypotheses/
 saves/
 slurm-scripts/
 wandb/
+
+.env
+infra/tei/data
+tmp
