@@ -25,3 +25,5 @@ tmp
 demo/*.csv
 demo/*.json
 demo/*.parquet
+
+datasets/
